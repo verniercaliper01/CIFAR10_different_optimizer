@@ -6,9 +6,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch.optim as optim
 from tqdm import tqdm
+from sklearn.metrics import classification_report, confusion_matrix, precision_score, recall_score, roc_curve, auc
+from sklearn.preprocessing import label_binarize
+import seaborn as sns
 
 import torch.nn as nn
 import torch
+from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import DataLoader
 
 
 class AlexNet(nn.Module):
@@ -64,6 +69,18 @@ class AlexNet(nn.Module):
                 nn.init.normal_(m.weight, 0, 0.01)
                 # 对全连接层的偏置使用常数初始化
                 nn.init.constant_(m.bias, 0)
+
+def plot_confusion_matrix(cm, classes):
+    plt.figure(figsize=(10, 10))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues')
+    plt.xlabel('Predicted')
+    plt.ylabel('True')
+    plt.title('Confusion Matrix')
+   # 添加类别标签
+    plt.xticks(ticks=np.arange(len(classes)), labels=classes, rotation=45)
+    plt.yticks(ticks=np.arange(len(classes)), labels=classes, rotation=0)
+   # 显示图像
+    plt.show()
 
 def main():
     #采用gpu还是cpu
@@ -141,8 +158,15 @@ def main():
     net.to(device)
     #使用 nn.CrossEntropyLoss() 定义交叉熵损失函数,它结合了softmax操作和负对数似然损失。
     loss_function = nn.CrossEntropyLoss()
-    #创建一个Adam优化器，设置学习率为 0.0002
-    optimizer = optim.Adam(net.parameters(), lr=0.0002)
+    # 定义三种不同的优化器
+    optimizers = {
+        'SGD': optim.SGD(net.parameters(), lr=0.01, momentum=0.9),  # SGD优化器，学习率0.01，动量0.9
+        'Adam': optim.Adam(net.parameters(), lr=0.001),  # Adam优化器，学习率0.001
+        'RMSprop': optim.RMSprop(net.parameters(), lr=0.0001)  # RMSprop优化器，学习率0.0001
+    }
+
+    # 创建一个SummaryWriter实例，用于写入TensorBoard日志
+    writer = SummaryWriter('runs/AlexNet_experiment')
 
     epochs = 10
     # 设置保存训练好的模型的路径
@@ -151,61 +175,84 @@ def main():
     best_acc = 0.0
     # 计算训练步骤的数量，等于训练数据加载器中的批次总数
     train_steps = len(train_loader)
-    for epoch in range(epochs):
-        # 设置模型为训练模式
-        net.train()
-        # 初始化本轮训练的累计损失
-        running_loss = 0.0
-        # 使用tqdm创建一个进度条，用于显示训练进度
-        train_bar = tqdm(train_loader, file=sys.stdout)
-        # 遍历训练数据加载器中的每个批次
-        for step, data in enumerate(train_bar):
-            # 从数据中提取图像和标签
-            images, labels = data
-            # 清除之前的梯度信息
-            optimizer.zero_grad()
-            # 将图像数据移动到设备上，并进行前向传播，获取模型输出
-            outputs = net(images.to(device))
-            # 计算损失函数
-            loss = loss_function(outputs, labels.to(device))
-            # 反向传播，计算梯度
-            loss.backward()
-            # 更新模型参数
-            optimizer.step()
-            # 累计本轮的损失，用于后续计算平均损失
-            running_loss += loss.item()
-            # 更新进度条的描述，显示当前epoch、总epochs和当前批次的损失
-            train_bar.desc = "train epoch[{}/{}] loss:{:.3f}".format(epoch + 1,
-                                                                     epochs,
-                                                                     loss)
-
-        # 将模型设置为评估模式，这会禁用dropout和batch normalization层的训练行为
-        net.eval()
-        # 初始化准确率计数器
-        acc = 0.0  # accumulate accurate number / epoch
-        # 使用torch.no_grad()禁用梯度计算，因为在评估阶段不需要计算梯度
-        with torch.no_grad():
-            # 创建验证数据的进度条
-            val_bar = tqdm(validate_loader, file=sys.stdout)
-            # 遍历验证数据加载器中的每个批次
-            for val_data in val_bar:
-                val_images, val_labels = val_data
+    for optimizer_name, optimizer in optimizers.items():
+        print(f"Training with {optimizer_name} optimizer")
+        for epoch in range(epochs):
+            # 设置模型为训练模式
+            net.train()
+            # 初始化本轮训练的累计损失
+            running_loss = 0.0
+            # 使用tqdm创建一个进度条，用于显示训练进度
+            train_bar = tqdm(train_loader, file=sys.stdout)
+            # 遍历训练数据加载器中的每个批次
+            for step, data in enumerate(train_bar):
+                # 从数据中提取图像和标签
+                images, labels = data
+                # 清除之前的梯度信息
+                optimizer.zero_grad()
                 # 将图像数据移动到设备上，并进行前向传播，获取模型输出
-                outputs = net(val_images.to(device))
-                # 获取预测结果，即输出中最大值的索引
-                predict_y = torch.max(outputs, dim=1)[1]
-                # 计算预测正确的数量，并累加到acc变量中
-                acc += torch.eq(predict_y, val_labels.to(device)).sum().item()
-        # 计算整个验证集的平均准确率
-        val_accurate = acc / val_num
-        # 打印当前epoch的训练损失和验证准确率
-        print('[epoch %d] train_loss: %.3f  val_accuracy: %.3f' %
-              (epoch + 1, running_loss / train_steps, val_accurate))
-        # 如果当前epoch的验证准确率高于之前记录的最佳准确率，则更新最佳准确率，并保存模型
-        if val_accurate > best_acc:
-            best_acc = val_accurate
-            torch.save(net.state_dict(), save_path)
+                outputs = net(images.to(device))
+                # 计算损失函数
+                loss = loss_function(outputs, labels.to(device))
+                # 反向传播，计算梯度
+                loss.backward()
+                # 更新模型参数
+                optimizer.step()
+                # 累计本轮的损失，用于后续计算平均损失
+                running_loss += loss.item()
+                # 更新进度条的描述，显示当前epoch、总epochs和当前批次的损失
+                train_bar.desc = f"{optimizer_name} train epoch[{epoch + 1}/{epochs}] loss:{loss:.3f}"
+            # 将损失写入TensorBoard
+            writer.add_scalar(f'{optimizer_name}/Training Loss', running_loss / len(train_loader), epoch + 1)
 
+            # 将模型设置为评估模式，这会禁用dropout和batch normalization层的训练行为
+            net.eval()
+            total = 0  # 总样本数
+            # 初始化准确率计数器
+            acc = 0.0  # accumulate accurate number / epoch
+            precision_sum = 0  # 精确率总和
+            recall_sum = 0  # 召回率总和
+            all_labels = []  # 存储所有真实标签
+            all_preds = []  # 存储所有预测结果
+            # 使用torch.no_grad()禁用梯度计算，因为在评估阶段不需要计算梯度
+            with torch.no_grad():
+                # 创建验证数据的进度条
+                val_bar = tqdm(validate_loader, file=sys.stdout)
+                # 遍历验证数据加载器中的每个批次
+                for val_data in val_bar:
+                    val_images, val_labels = val_data
+                    # 将图像数据移动到设备上，并进行前向传播，获取模型输出
+                    outputs = net(val_images.to(device))
+                    # 获取预测结果，即输出中最大值的索引
+                    predict_y = torch.max(outputs, dim=1)[1]
+                    total += val_labels.size(0)  # 更新总样本数
+                    # 计算预测正确的数量，并累加到acc变量中
+                    acc += torch.eq(predict_y, val_labels.to(device)).sum().item()
+                    # 计算精确率和召回率，并将结果累加
+                    precision_sum += precision_score(val_labels.cpu().numpy(), predict_y.cpu().numpy(), average='macro',zero_division=0)
+                    recall_sum += recall_score(val_labels.cpu().numpy(), predict_y.cpu().numpy(), average='macro',zero_division=0)
+                    all_labels.extend(val_labels.cpu().numpy())  # 将真实标签添加到列表中
+                    all_preds.extend(predict_y.cpu().numpy())  # 将预测结果添加到列表中
+            # 计算整个验证集的平均准确率
+            val_accurate = acc / val_num
+            precision = precision_sum / len(validate_loader)  # 平均精确率
+            recall = recall_sum / len(validate_loader)  # 平均召回率
+            #print(f'[{optimizer_name} epoch {epoch + 1}] train_loss: {running_loss / len(train_loader):.3f}  val_accuracy: {val_accurate:.3f}  val_precision: {precision:.3f}  val_recall: {recall:.3f}')
+            # 计算混淆矩阵
+            cm = confusion_matrix(all_labels, all_preds)
+            # 绘制混淆矩阵
+            plot_confusion_matrix(cm, cifar10_classes.values())
+            # 打印分类报告
+            print(classification_report(all_labels, all_preds, target_names=cifar10_classes.values()))
+            # 将性能指标写入TensorBoard
+            writer.add_scalar(f'{optimizer_name}/Validation Accuracy', val_accurate, epoch + 1)  # 写入准确率
+            writer.add_scalar(f'{optimizer_name}/Validation Precision', precision, epoch + 1)  # 写入精确率
+            writer.add_scalar(f'{optimizer_name}/Validation Recall', recall, epoch + 1)  # 写入召回率
+            # 如果当前epoch的验证准确率高于之前记录的最佳准确率，则更新最佳准确率，并保存模型
+            if val_accurate > best_acc:
+                best_acc = val_accurate
+                torch.save(net.state_dict(), save_path)
+    writer.close()
     print('Finished Training')
 
 
